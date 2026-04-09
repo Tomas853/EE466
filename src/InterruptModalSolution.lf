@@ -1,0 +1,96 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true,
+  keepalive: true
+}
+
+preamble {=
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+
+#define BUTTON_A 25
+#define DEBOUNCE_NS 200000000LL
+
+static void* button_action_ptr = NULL;
+static instant_t last_physical = 0LL;
+
+static void lcd_show_number(int value) {
+    printf("LCD: %d\n", value);
+}
+
+static void button_callback(uint gpio, uint32_t events) {
+    instant_t now = lf_time_physical_elapsed();
+    if ((now - last_physical) > DEBOUNCE_NS) {
+        last_physical = now;
+        if (button_action_ptr != NULL) {
+            lf_schedule(button_action_ptr, 0);
+        }
+    }
+}
+=}
+
+reactor Counter {
+    input toggle: int
+    timer fast(0, 500 msec)
+    timer slow(0, 1000 msec)
+
+    state count: int = 0
+    state mode_down: int = 0
+
+    reaction(fast) {=
+        if (self->mode_down == 0) {
+            self->count += 1;
+            lcd_show_number(self->count);
+        }
+    =}
+
+    reaction(slow) {=
+        if (self->mode_down == 1) {
+            self->count -= 1;
+            lcd_show_number(self->count);
+        }
+    =}
+
+    reaction(toggle) {=
+        if (self->mode_down == 0) {
+            self->mode_down = 1;
+            printf("Switching to CountDown mode.\n");
+        } else {
+            self->mode_down = 0;
+            printf("Switching to CountUp mode.\n");
+        }
+    =}
+}
+
+main reactor {
+    physical action button_event
+    c = new Counter()
+
+    reaction(startup) -> button_event {=
+        button_action_ptr = button_event;
+
+        stdio_init_all();
+
+        gpio_init(BUTTON_A);
+        gpio_set_dir(BUTTON_A, GPIO_IN);
+        gpio_pull_up(BUTTON_A);
+
+        gpio_set_irq_enabled_with_callback(
+            BUTTON_A,
+            GPIO_IRQ_EDGE_FALL,
+            true,
+            &button_callback
+        );
+
+        printf("InterruptModalSolution started.\n");
+    =}
+
+    reaction(button_event) -> c.toggle {=
+        lf_set(c.toggle, 1);
+        printf("Button push detected.\n");
+    =}
+}

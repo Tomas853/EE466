@@ -1,0 +1,66 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true,
+  keepalive: true
+}
+
+preamble {=
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+
+#define BUTTON_A 25
+#define DEBOUNCE_NS 200000000LL
+
+static void* action_ptr = NULL;
+static instant_t last_physical = 0LL;
+
+static void button_callback(uint gpio, uint32_t events) {
+    instant_t now = lf_time_physical_elapsed();
+    if ((now - last_physical) > DEBOUNCE_NS) {
+        last_physical = now;
+        if (action_ptr != NULL) {
+            lf_schedule(action_ptr, 0);
+        }
+    }
+}
+=}
+
+main reactor {
+    physical action button_event
+    state last_logical: interval_t = 0
+
+    reaction(startup) -> button_event {=
+        action_ptr = button_event;
+
+        stdio_init_all();
+
+        gpio_init(BUTTON_A);
+        gpio_set_dir(BUTTON_A, GPIO_IN);
+        gpio_pull_up(BUTTON_A);
+
+        gpio_set_irq_enabled_with_callback(
+            BUTTON_A,
+            GPIO_IRQ_EDGE_FALL,
+            true,
+            &button_callback
+        );
+
+        self->last_logical = 0LL;
+        printf("InterruptDebouncedSolution started.\n");
+    =}
+
+    reaction(button_event) {=
+        interval_t now = lf_time_logical_elapsed();
+        if (self->last_logical != 0LL) {
+            long long diff_ms = (now - self->last_logical) / 1000000LL;
+            printf("Debounced press. Logical elapsed since last press: %lld ms\n", diff_ms);
+        } else {
+            printf("Debounced press. First press.\n");
+        }
+        self->last_logical = now;
+    =}
+}
