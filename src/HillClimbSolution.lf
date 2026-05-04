@@ -1,0 +1,190 @@
+/**
+ * HillClimbSolution.lf
+ *
+ * Pololu 3pi+ 2040 — Hill Climbing Lab (no line sensors)
+ *
+ * Behavior:
+ *  1. CLIMB: Drives forward. Detects flat top via accelerometer pitch.
+ *  2. SPIN_180: Uses GyroAngle z to spin 180 degrees.
+ *  3. DESCEND: Drives forward (now downhill). Detects flat bottom.
+ *  4. DONE: Stops.
+ */
+
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true,
+  build-type: RelWithDebInfo
+}
+
+import Accelerometer from "lib/IMU.lf"
+import GyroAngle from "lib/IMU.lf"
+import Motors from "lib/Motors.lf"
+import Display from "lib/Display.lf"
+
+preamble {=
+  #include <stdio.h>
+
+  // Motor power: -1.0 (full reverse) to +1.0 (full forward)
+  #define BASE_POWER        0.25f
+  #define SPIN_POWER        0.15f
+
+  // Roll steering gain — 0 until straight-line motion confirmed, then try 0.1
+  #define ROLL_GAIN         0.0f
+
+  // Pitch threshold in g's — |ax| below this = flat ground
+  // sin(15 deg) = 0.26; start a bit lower to be safe
+  #define SLOPE_THRESH      0.20f
+
+  // Consecutive flat readings (at 50ms each) to declare top/bottom reached
+  #define FLAT_COUNT_NEEDED 25
+
+  // Stop spin when |GyroAngle z| reaches this many degrees
+  #define SPIN_TARGET_DEG   170.0f
+
+  typedef enum {
+    STATE_CLIMB,
+    STATE_SPIN_180,
+    STATE_DESCEND,
+    STATE_DONE
+  } RobotState;
+=}
+
+main reactor {
+
+  accel  = new Accelerometer()
+  gangle = new GyroAngle()
+  motors = new Motors()
+  disp   = new Display()
+
+  timer sample(0, 50 ms)
+  timer disp_tick(0, 200 ms)
+
+  state robot_state: RobotState = {= STATE_CLIMB =}
+
+  // Accelerometer readings in g's
+  state ax: float = 0.0   // forward/back tilt (pitch)
+  state ay: float = 0.0   // left/right tilt   (roll)
+
+  // Integrated yaw from GyroAngle (degrees)
+  state angle_z: float = 0.0
+
+  // Flat region detection
+  state flat_count:        int  = 0
+  state has_been_on_slope: bool = false
+
+  // ── Main 50 ms control loop ─────────────────────────────────────────
+  reaction(sample) -> accel.trigger, gangle.trigger,
+                      motors.left_power, motors.right_power {=
+
+    lf_set(accel.trigger, true);
+
+    if (self->robot_state == STATE_SPIN_180) {
+      lf_set(gangle.trigger, true);
+    }
+
+    float l = 0.0f, r = 0.0f;
+    float abs_pitch = self->ax < 0 ? -self->ax : self->ax;
+
+    switch (self->robot_state) {
+
+    case STATE_CLIMB: {
+      // Track whether we've been on the slope yet
+      if (abs_pitch > SLOPE_THRESH) {
+        self->has_been_on_slope = true;
+        self->flat_count = 0;
+      } else if (self->has_been_on_slope) {
+        // We were on a slope and now it's flat — we're at the top
+        self->flat_count++;
+        if (self->flat_count >= FLAT_COUNT_NEEDED) {
+          lf_print("Reached top — spinning 180.");
+          self->robot_state       = STATE_SPIN_180;
+          self->flat_count        = 0;
+          self->has_been_on_slope = false;
+          self->angle_z           = 0.0f;
+          l = r = 0.0f;
+          break;
+        }
+      }
+      float correction = self->ay * ROLL_GAIN;
+      l = BASE_POWER + correction;
+      r = BASE_POWER - correction;
+      break;
+    }
+
+    case STATE_SPIN_180: {
+      float abs_angle = self->angle_z < 0 ? -self->angle_z : self->angle_z;
+      if (abs_angle >= SPIN_TARGET_DEG) {
+        lf_print("Spin done — descending.");
+        self->robot_state       = STATE_DESCEND;
+        self->flat_count        = 0;
+        self->has_been_on_slope = false;
+        l = r = 0.0f;
+      } else {
+        l =  SPIN_POWER;
+        r = -SPIN_POWER;
+      }
+      break;
+    }
+
+    case STATE_DESCEND: {
+      if (abs_pitch > SLOPE_THRESH) {
+        self->has_been_on_slope = true;
+        self->flat_count = 0;
+      } else if (self->has_been_on_slope) {
+        self->flat_count++;
+        if (self->flat_count >= FLAT_COUNT_NEEDED) {
+          lf_print("Reached bottom — done.");
+          self->robot_state = STATE_DONE;
+          l = r = 0.0f;
+          break;
+        }
+      }
+      float correction = self->ay * ROLL_GAIN;
+      l = BASE_POWER + correction;
+      r = BASE_POWER - correction;
+      break;
+    }
+
+    case STATE_DONE:
+    default:
+      l = r = 0.0f;
+      break;
+    }
+
+    lf_set(motors.left_power,  l);
+    lf_set(motors.right_power, r);
+  =}
+
+  // ── Capture accelerometer ──────────────────────────────────────────
+  reaction(accel.x, accel.y) {=
+    if (accel.x->is_present) self->ax = accel.x->value;
+    if (accel.y->is_present) self->ay = accel.y->value;
+  =}
+
+  // ── Capture GyroAngle z for spin tracking ─────────────────────────
+  reaction(gangle.z) {=
+    if (gangle.z->is_present) self->angle_z = gangle.z->value;
+  =}
+
+  // ── LCD display ───────────────────────────────────────────────────
+  reaction(disp_tick) -> disp.line0, disp.line1 {=
+    char buf0[17];
+    char buf1[17];
+    const char* s;
+    switch (self->robot_state) {
+      case STATE_CLIMB:    s = "Climbing";    break;
+      case STATE_SPIN_180: s = "Spinning";    break;
+      case STATE_DESCEND:  s = "Descending";  break;
+      case STATE_DONE:     s = "Done!";       break;
+      default:             s = "Unknown";     break;
+    }
+    snprintf(buf0, sizeof(buf0), "%-16s", s);
+    snprintf(buf1, sizeof(buf1), "P:%4d R:%4d",
+             (int)(self->ax * 100), (int)(self->ay * 100));
+    lf_set(disp.line0, buf0);
+    lf_set(disp.line1, buf1);
+  =}
+}

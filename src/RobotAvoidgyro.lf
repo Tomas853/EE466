@@ -1,0 +1,193 @@
+/**
+ * Robot that navigates in a square while avoiding obstacles using bump sensors.
+ * Uses the gyroscope to detect when turns are complete (90 degrees) instead
+ * of fixed-time turning. Bump detection triggers a backup + avoidance turn.
+ *
+ * Modal model structure:
+ *   - NavigateForward mode: drives forward for a fixed time, then turns 90°
+ *   - NavigateTurn mode: turns until gyro accumulates 90°
+ *   - Avoid mode: backs up, then turns ~90° away using gyro, then resumes
+ *
+ * @author (student solution based on Pololu 3pi+ 2040 template)
+ */
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+import Bump from "lib/Bump.lf"
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+import GyroAngle from "lib/IMU.lf"
+
+preamble {=
+  // Square navigation
+  #define FWD_DURATION_MS     2000
+  #define DRIVE_POWER         0.15f
+  #define TURN_POWER          0.15f
+
+  // Avoidance maneuver
+  #define BACKUP_DURATION_MS  600
+  #define BACKUP_POWER       -0.15f
+
+  // Gyro thresholds (degrees)
+  #define SQUARE_TURN_DEGREES  90.0f
+  #define AVOID_TURN_DEGREES   90.0f
+
+  // Gyro polling interval
+  #define GYRO_POLL_MS         10
+
+  // Simple numerical integration: degrees += gz_dps * dt_sec
+  // gz is the Z-axis angular rate in degrees/sec from the IMU
+=}
+
+main reactor {
+  bump  = new Bump()
+  disp  = new Display()
+  drive = new Motors()
+  imu   = new GyroAngle()
+
+  logical action fwd_done
+  logical action backup_done
+  logical action gyro_poll    // periodic tick for sampling the gyro
+
+  state left_bumped:    bool  = false
+  state accumulated_deg: float = 0.0   // integrated heading change for current turn
+  state target_deg:      float = 0.0   // how many degrees we want to turn
+  state in_avoid_turn:   bool  = false // true while doing avoidance turn
+
+  initial mode NavigateForward {
+    reaction(reset) -> drive.left_power, drive.right_power, fwd_done, disp.line0 {=
+      lf_set(drive.left_power,  DRIVE_POWER);
+      lf_set(drive.right_power, DRIVE_POWER);
+      lf_set(disp.line0, "Forward");
+      lf_schedule(fwd_done, MSEC(FWD_DURATION_MS));
+    =}
+
+    reaction(fwd_done) -> reset(NavigateTurn) {=
+      lf_set_mode(NavigateTurn);
+    =}
+
+    reaction(bump.left) -> reset(Avoid) {=
+      self->left_bumped = true;
+      lf_set_mode(Avoid);
+    =}
+
+    reaction(bump.right) -> reset(Avoid) {=
+      self->left_bumped = false;
+      lf_set_mode(Avoid);
+    =}
+  }
+
+  // ------------------------------------------------------------------
+  // NavigateTurn: spin until gyro accumulates SQUARE_TURN_DEGREES (90°)
+  // ------------------------------------------------------------------
+  mode NavigateTurn {
+    reaction(reset) -> drive.left_power, drive.right_power, gyro_poll, disp.line0 {=
+      // Reset integrator and set target
+      self->accumulated_deg = 0.0f;
+      self->target_deg       = SQUARE_TURN_DEGREES;
+      self->in_avoid_turn    = false;
+
+      // Spin in place (left forward, right backward → turn right)
+      lf_set(drive.left_power,   TURN_POWER);
+      lf_set(drive.right_power, -TURN_POWER);
+      lf_set(disp.line0, "Turning 90");
+
+      // Start periodic gyro polling
+      lf_schedule(gyro_poll, MSEC(GYRO_POLL_MS));
+    =}
+
+    // Poll the gyro every GYRO_POLL_MS milliseconds
+    reaction(gyro_poll) -> gyro_poll, reset(NavigateForward), disp.line1 {=
+      // imu.gz is the Z-axis rate in degrees/sec (yaw rate)
+      float gz = imu->gz;
+      float dt = (float)GYRO_POLL_MS / 1000.0f;
+
+      // Accumulate absolute rotation
+      self->accumulated_deg += fabsf(gz * dt);
+
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%.1f deg", self->accumulated_deg);
+      lf_set(disp.line1, buf);
+
+      if (self->accumulated_deg >= self->target_deg) {
+        // Turn complete — stop motors and go back to forward
+        lf_set_mode(NavigateForward);
+      } else {
+        // Keep polling
+        lf_schedule(gyro_poll, MSEC(GYRO_POLL_MS));
+      }
+    =}
+
+    reaction(bump.left) -> reset(Avoid) {=
+      self->left_bumped = true;
+      lf_set_mode(Avoid);
+    =}
+
+    reaction(bump.right) -> reset(Avoid) {=
+      self->left_bumped = false;
+      lf_set_mode(Avoid);
+    =}
+  }
+
+  // ------------------------------------------------------------------
+  // Avoid: back up, then gyro-based turn away from obstacle
+  // ------------------------------------------------------------------
+  mode Avoid {
+    reaction(reset) -> drive.left_power, drive.right_power, backup_done,
+                       disp.line0, disp.line1 {=
+      lf_set(drive.left_power,  BACKUP_POWER);
+      lf_set(drive.right_power, BACKUP_POWER);
+      lf_set(disp.line0, "BUMP! Backing");
+      lf_set(disp.line1, self->left_bumped ? "< left" : "right >");
+      lf_schedule(backup_done, MSEC(BACKUP_DURATION_MS));
+    =}
+
+    reaction(backup_done) -> drive.left_power, drive.right_power, gyro_poll,
+                             disp.line0 {=
+      lf_set(disp.line0, "Avoiding...");
+
+      // Reset integrator for the avoidance turn
+      self->accumulated_deg = 0.0f;
+      self->target_deg       = AVOID_TURN_DEGREES;
+      self->in_avoid_turn    = true;
+
+      if (self->left_bumped) {
+        // Obstacle on left → turn right
+        lf_set(drive.left_power,   TURN_POWER);
+        lf_set(drive.right_power, -TURN_POWER);
+      } else {
+        // Obstacle on right → turn left
+        lf_set(drive.left_power,  -TURN_POWER);
+        lf_set(drive.right_power,  TURN_POWER);
+      }
+
+      lf_schedule(gyro_poll, MSEC(GYRO_POLL_MS));
+    =}
+
+    // Gyro polling during avoidance turn
+    reaction(gyro_poll) -> gyro_poll, drive.left_power, drive.right_power,
+                           disp.line1, reset(NavigateForward) {=
+      float gz = imu->gz;
+      float dt = (float)GYRO_POLL_MS / 1000.0f;
+      self->accumulated_deg += fabsf(gz * dt);
+
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%.1f deg", self->accumulated_deg);
+      lf_set(disp.line1, buf);
+
+      if (self->accumulated_deg >= self->target_deg) {
+        // Avoidance turn complete — stop and resume forward
+        lf_set(drive.left_power,  0.0f);
+        lf_set(drive.right_power, 0.0f);
+        lf_set(disp.line1, "");
+        lf_set_mode(NavigateForward);
+      } else {
+        lf_schedule(gyro_poll, MSEC(GYRO_POLL_MS));
+      }
+    =}
+  }
+}

@@ -1,0 +1,70 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Encoders from "lib/Encoders.lf"
+
+preamble {=
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+=}
+
+reactor AngleToDistance {
+  input angle: int32_t
+  output distance: float
+
+  state prev: int32_t = 0
+  state total: float = 0.0
+
+  reaction(angle) -> distance {=
+    const float d = 0.03175f;
+    const float meters_per_deg = (float)(M_PI * d / 360.0);
+
+    int32_t delta = angle->value - self->prev;
+    self->total += ((float)delta) * meters_per_deg;
+    self->prev = angle->value;
+
+    lf_set(distance, self->total);
+  =}
+}
+
+main reactor {
+  enc = new Encoders()
+  disp = new Display()
+
+  left = new AngleToDistance()
+  right = new AngleToDistance()
+
+  timer t(0, 200 msec)
+
+  enc.left -> left.angle
+  enc.right -> right.angle
+
+  reaction(startup) -> disp.line0, disp.line1, disp.line2 {=
+    lf_set(disp.line0, "Encoder Dist");
+    lf_set(disp.line1, "L 0.00 m");
+    lf_set(disp.line2, "R 0.00 m");
+  =}
+
+  reaction(t) -> enc.trigger {=
+    lf_set(enc.trigger, true);
+  =}
+
+  reaction(left.distance) -> disp.line1 {=
+    char buf[17];
+    snprintf(buf, sizeof(buf), "L %.2f m", left.distance->value);
+    lf_set(disp.line1, buf);
+  =}
+
+  reaction(right.distance) -> disp.line2 {=
+    char buf[17];
+    snprintf(buf, sizeof(buf), "R %.2f m", right.distance->value);
+    lf_set(disp.line2, buf);
+  =}
+}

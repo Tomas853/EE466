@@ -1,0 +1,21 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Motors from "lib/Motors.lf"
+import Display from "lib/Display.lf"
+
+main reactor {
+  motors = new Motors()
+  display = new Display()
+
+  reaction(startup) -> motors.left_power, motors.right_power, display.line0 {=
+    lf_set(motors.left_power, 0.12f);
+    lf_set(motors.right_power, 0.18f);
+    lf_set(display.line0, "CIRCLE MODE");
+  =}
+}

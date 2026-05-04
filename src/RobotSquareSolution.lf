@@ -1,0 +1,91 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Motors from "lib/Motors.lf"
+import Encoders from "lib/Encoders.lf"
+import GyroAngle from "lib/IMU.lf"
+
+preamble {=
+#include <math.h>
+=}
+
+reactor Controller {
+  input dist: float
+  input angle: float
+
+  output l: float
+  output r: float
+
+  state start_d: float = 0.0
+  state start_a: float = 0.0
+  state current_angle: float = 0.0
+
+  initial mode DRIVE {
+    reaction(dist, angle) -> l, r, reset(TURN) {=
+      if (angle->is_present) {
+        self->current_angle = angle->value;
+      }
+
+      if (dist->value - self->start_d >= 0.5) {
+        self->start_a = self->current_angle;
+        lf_set(l, -0.1);
+        lf_set(r, 0.1);
+        lf_set_mode(TURN);
+      } else {
+        lf_set(l, 0.12);
+        lf_set(r, 0.12);
+      }
+    =}
+  }
+
+  mode TURN {
+    reaction(dist, angle) -> l, r, reset(DRIVE) {=
+      if (fabs(angle->value - self->start_a) >= 90.0) {
+        self->start_d = dist->value;
+        lf_set(l, 0.12);
+        lf_set(r, 0.12);
+        lf_set_mode(DRIVE);
+      } else {
+        lf_set(l, -0.1);
+        lf_set(r, 0.1);
+      }
+    =}
+  }
+}
+
+main reactor {
+  enc = new Encoders()
+  gyro = new GyroAngle()
+  motors = new Motors()
+
+  ctrl = new Controller()
+
+  timer t(0, 50 msec)
+
+  state dist: float = 0.0
+  state prev_left: int = 0
+
+  reaction(t) -> enc.trigger, gyro.trigger {=
+    lf_set(enc.trigger, true);
+    lf_set(gyro.trigger, true);
+  =}
+
+  reaction(enc.left) -> ctrl.dist {=
+    float d = 0.03175;
+    float m = M_PI * d / 360.0;
+    int delta = enc.left->value - self->prev_left;
+    self->dist += delta * m;
+    self->prev_left = enc.left->value;
+    lf_set(ctrl.dist, self->dist);
+  =}
+
+  gyro.z -> ctrl.angle
+
+  ctrl.l -> motors.left_power
+  ctrl.r -> motors.right_power
+}

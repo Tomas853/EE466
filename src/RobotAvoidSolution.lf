@@ -1,0 +1,127 @@
+/**
+ * Robot that navigates in a square while avoiding obstacles using bump sensors.
+ * When a bump is detected, the robot backs up and turns away from the obstacle
+ * before resuming its square-navigation pattern.
+ *
+ * Modal model structure:
+ *   - NavigateForward mode: drives forward for a fixed time, then turns 90 degrees
+ *   - Avoid mode: on bump detection, backs up, turns away, then returns to NavigateForward
+ *
+ * @author (student solution based on Pololu 3pi+ 2040 template)
+ */
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Bump from "lib/Bump.lf"
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+
+// Timing constants
+preamble {=
+  #define FWD_DURATION_MS    2500
+  #define TURN_DURATION_MS    300
+  #define DRIVE_POWER        0.13f
+  #define TURN_POWER         0.10f
+
+  #define BACKUP_DURATION_MS  600
+  #define AVOID_TURN_MS       500
+  #define BACKUP_POWER       -0.13f
+=}
+
+main reactor {
+  bump  = new Bump()
+  disp  = new Display()
+  drive = new Motors()
+
+  logical action fwd_done
+  logical action turn_done
+  logical action backup_done
+  logical action avoid_turn_done
+
+  state left_bumped: bool = false
+
+  initial mode NavigateForward {
+
+    reaction(reset) -> drive.left_power, drive.right_power, fwd_done, disp.line0 {=
+      lf_set(drive.left_power, DRIVE_POWER);
+      lf_set(drive.right_power, DRIVE_POWER);
+      lf_set(disp.line0, "Forward");
+      lf_schedule(fwd_done, MSEC(FWD_DURATION_MS));
+    =}
+
+    reaction(fwd_done) -> reset(NavigateTurn) {=
+      lf_set_mode(NavigateTurn);
+    =}
+
+    reaction(bump.left) -> reset(Avoid) {=
+      self->left_bumped = true;
+      lf_set_mode(Avoid);
+    =}
+
+    reaction(bump.right) -> reset(Avoid) {=
+      self->left_bumped = false;
+      lf_set_mode(Avoid);
+    =}
+  }
+
+  mode NavigateTurn {
+
+    reaction(reset) -> drive.left_power, drive.right_power, turn_done, disp.line0 {=
+      lf_set(drive.left_power, TURN_POWER);
+      lf_set(drive.right_power, -TURN_POWER);
+      lf_set(disp.line0, "Turning");
+      lf_schedule(turn_done, MSEC(TURN_DURATION_MS));
+    =}
+
+    reaction(turn_done) -> reset(NavigateForward) {=
+      lf_set_mode(NavigateForward);
+    =}
+
+    reaction(bump.left) -> reset(Avoid) {=
+      self->left_bumped = true;
+      lf_set_mode(Avoid);
+    =}
+
+    reaction(bump.right) -> reset(Avoid) {=
+      self->left_bumped = false;
+      lf_set_mode(Avoid);
+    =}
+  }
+
+  mode Avoid {
+
+    reaction(reset) -> drive.left_power, drive.right_power, backup_done, disp.line0, disp.line1 {=
+      lf_set(drive.left_power, BACKUP_POWER);
+      lf_set(drive.right_power, BACKUP_POWER);
+      lf_set(disp.line0, "BUMP! Backing");
+      lf_set(disp.line1, self->left_bumped ? "< left" : "right >");
+      lf_schedule(backup_done, MSEC(BACKUP_DURATION_MS));
+    =}
+
+    reaction(backup_done) -> drive.left_power, drive.right_power, avoid_turn_done, disp.line0 {=
+      lf_set(disp.line0, "Avoiding...");
+      if (self->left_bumped) {
+        // Obstacle on left, turn right
+        lf_set(drive.left_power, TURN_POWER);
+        lf_set(drive.right_power, -TURN_POWER);
+      } else {
+        // Obstacle on right, turn left
+        lf_set(drive.left_power, -TURN_POWER);
+        lf_set(drive.right_power, TURN_POWER);
+      }
+      lf_schedule(avoid_turn_done, MSEC(AVOID_TURN_MS));
+    =}
+
+    reaction(avoid_turn_done) -> drive.left_power, drive.right_power, disp.line1, reset(NavigateForward) {=
+      lf_set(drive.left_power, 0.0f);
+      lf_set(drive.right_power, 0.0f);
+      lf_set(disp.line1, "");
+      lf_set_mode(NavigateForward);
+    =}
+  }
+}
